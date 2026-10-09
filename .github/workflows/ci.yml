@@ -1,0 +1,590 @@
+name: E-commerce UI Automation CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox]
+        python-version: ['3.11', '3.12']
+    
+    name: Test on ${{ matrix.browser }} with Python ${{ matrix.python-version }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Clean up any existing processes and cache
+      run: |
+        # Kill any existing browser processes to avoid conflicts
+        pkill -f firefox || true
+        pkill -f chrome || true
+        pkill -f geckodriver || true
+        pkill -f chromedriver || true
+        pkill -f "Xvfb" || true
+        
+        # Clear all WebDriver Manager caches to ensure fresh downloads
+        rm -rf ~/.wdm
+        rm -rf ~/.cache/selenium
+        rm -rf /tmp/.wdm
+        
+        # Wait for processes to terminate
+        sleep 2
+        
+        echo "Process cleanup and cache clearing completed"
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        # Install essential packages for headless browser testing
+        sudo apt-get install -y wget unzip xvfb dbus-x11
+        # Install additional X11 and audio libraries for Firefox stability
+        sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libxt6 libxcomposite1
+        sudo apt-get install -y libasound2t64 libpangocairo-1.0-0 libatk1.0-0
+        sudo apt-get install -y libcairo-gobject2 libgtk-3-0 libgdk-pixbuf2.0-0
+    
+    - name: Install Chrome
+      if: matrix.browser == 'chrome'
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        
+    - name: Install Firefox
+      if: matrix.browser == 'firefox'
+      run: |
+        # Remove any existing Firefox installations to avoid conflicts
+        sudo apt-get remove -y firefox firefox-esr
+        sudo apt-get autoremove -y
+        
+        # Install Firefox from snap for better CI compatibility
+        sudo snap install firefox
+        
+        # Create symlink for standard firefox command
+        sudo ln -sf /snap/bin/firefox /usr/bin/firefox
+        
+        # Verify Firefox installation and version
+        firefox --version || echo "Firefox installation verification failed"
+        
+        # Create Firefox profile directory with proper permissions
+        mkdir -p ~/.mozilla/firefox
+        chmod 755 ~/.mozilla/firefox
+        
+        # Set Firefox environment variables for headless mode
+        echo "MOZ_HEADLESS=1" >> $GITHUB_ENV
+        echo "MOZ_DISABLE_CONTENT_SANDBOX=1" >> $GITHUB_ENV
+        echo "MOZ_CRASHREPORTER_DISABLE=1" >> $GITHUB_ENV
+    
+    - name: Install WebDriver Manager and dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install webdriver-manager
+        pip install -r requirements.txt
+    
+    - name: Clear WebDriver Manager cache
+      run: |
+        # Clear WebDriver Manager cache to ensure fresh driver downloads
+        rm -rf ~/.wdm
+        python -c "
+        import os
+        import shutil
+        
+        # Clear common cache directories
+        cache_dirs = [
+            os.path.expanduser('~/.wdm'),
+            os.path.expanduser('~/.cache/selenium'),
+            '/tmp/.wdm'
+        ]
+        
+        for cache_dir in cache_dirs:
+            if os.path.exists(cache_dir):
+                shutil.rmtree(cache_dir)
+                print(f'Cleared cache: {cache_dir}')
+        "
+    
+    - name: Setup ChromeDriver
+      if: matrix.browser == 'chrome'
+      run: |
+        python -c "
+        from webdriver_manager.chrome import ChromeDriverManager
+        import os
+        import glob
+        
+        # Get the ChromeDriver installation directory
+        manager = ChromeDriverManager()
+        driver_path = manager.install()
+        print(f'WebDriver Manager returned: {driver_path}')
+        
+        # If the returned path is a documentation file, find the actual binary
+        if 'THIRD_PARTY_NOTICES' in driver_path or not driver_path.endswith(('chromedriver', 'chromedriver.exe')):
+            print('Returned path is not the actual driver, searching for chromedriver binary...')
+            
+            # Get the directory containing the driver
+            driver_dir = os.path.dirname(driver_path)
+            print(f'Searching in directory: {driver_dir}')
+            
+            # Look for the actual chromedriver binary in the same directory
+            possible_paths = [
+                os.path.join(driver_dir, 'chromedriver'),
+                os.path.join(driver_dir, 'chromedriver.exe'),
+                os.path.join(driver_dir, '..', 'chromedriver'),
+                os.path.join(driver_dir, '..', 'chromedriver.exe')
+            ]
+            
+            # Also search using glob patterns
+            glob_patterns = [
+                os.path.join(driver_dir, '**/chromedriver'),
+                os.path.join(driver_dir, '**/chromedriver.exe'),
+                os.path.join(os.path.dirname(driver_dir), '**/chromedriver'),
+                os.path.join(os.path.dirname(driver_dir), '**/chromedriver.exe')
+            ]
+            
+            actual_driver_path = None
+            
+            # Check direct paths first (including non-executable files)
+            for path in possible_paths:
+                if os.path.exists(path) and 'THIRD_PARTY_NOTICES' not in path and path.endswith(('chromedriver', 'chromedriver.exe')):
+                    actual_driver_path = path
+                    print(f'Found potential ChromeDriver at: {path}')
+                    break
+            
+            # If not found, use glob search
+            if not actual_driver_path:
+                for pattern in glob_patterns:
+                    matches = glob.glob(pattern, recursive=True)
+                    for match in matches:
+                        if 'THIRD_PARTY_NOTICES' not in match and match.endswith(('chromedriver', 'chromedriver.exe')):
+                            actual_driver_path = match
+                            print(f'Found ChromeDriver via glob: {match}')
+                            break
+                    if actual_driver_path:
+                        break
+            
+            if actual_driver_path:
+                print(f'Found actual ChromeDriver at: {actual_driver_path}')
+                
+                # Make the driver executable regardless of current permissions
+                print(f'Setting executable permissions on: {actual_driver_path}')
+                os.chmod(actual_driver_path, 0o755)
+                
+                # Verify it's now executable
+                if os.access(actual_driver_path, os.X_OK):
+                    print('ChromeDriver is now executable')
+                    driver_path = actual_driver_path
+                else:
+                    print('Warning: ChromeDriver still not executable after chmod')
+                    # Try alternative permission setting
+                    import stat
+                    current_perms = os.stat(actual_driver_path).st_mode
+                    os.chmod(actual_driver_path, current_perms | stat.S_IEXEC | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    if os.access(actual_driver_path, os.X_OK):
+                        print('ChromeDriver is now executable after alternative chmod')
+                        driver_path = actual_driver_path
+                    else:
+                        print('Error: Could not make ChromeDriver executable')
+                        exit(1)
+            else:
+                print('Error: Could not find actual ChromeDriver binary')
+                print('Available files in directory:')
+                for root, dirs, files in os.walk(driver_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        print(f'  {file_path} (executable: {os.access(file_path, os.X_OK)})')
+                exit(1)
+        else:
+            # Even if the path looks correct, ensure it's executable
+            print(f'Ensuring ChromeDriver is executable: {driver_path}')
+            os.chmod(driver_path, 0o755)
+        
+        # Final verification
+        if not os.access(driver_path, os.X_OK):
+            print(f'Error: ChromeDriver at {driver_path} is not executable')
+            exit(1)
+        
+        if 'THIRD_PARTY_NOTICES' in driver_path:
+            print(f'Error: Still pointing to documentation file: {driver_path}')
+            exit(1)
+        
+        print(f'ChromeDriver setup completed successfully at: {driver_path}')
+        "
+        
+    - name: Setup GeckoDriver for Firefox
+      if: matrix.browser == 'firefox'
+      run: |
+        # Clear any existing GeckoDriver processes
+        pkill -f geckodriver || true
+        
+        python -c "
+        from webdriver_manager.firefox import GeckoDriverManager
+        import os
+        import subprocess
+        import time
+        
+        # Let WebDriver Manager handle everything with default behavior
+        driver_path = GeckoDriverManager().install()
+        print(f'GeckoDriver installed at: {driver_path}')
+        
+        # Verify it's the actual binary
+        if not os.access(driver_path, os.X_OK):
+            print(f'Warning: {driver_path} is not executable')
+            os.chmod(driver_path, 0o755)
+        
+        if not driver_path.endswith(('geckodriver', 'geckodriver.exe')):
+            print(f'Error: Path does not point to driver binary: {driver_path}')
+            exit(1)
+        
+        print('GeckoDriver setup completed successfully')
+        "
+        
+        # Test Firefox startup with comprehensive error handling
+        echo "Testing Firefox startup with enhanced configuration..."
+        timeout 60 python -c "
+        from selenium import webdriver
+        from selenium.webdriver.firefox.options import Options
+        from selenium.webdriver.firefox.service import Service
+        from webdriver_manager.firefox import GeckoDriverManager
+        import os
+        import time
+        
+        # Enhanced Firefox options for CI stability
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-software-rasterizer')
+        options.add_argument('--disable-background-timer-throttling')
+        options.add_argument('--disable-renderer-backgrounding')
+        options.add_argument('--disable-backgrounding-occluded-windows')
+        
+        # Critical Firefox preferences for CI environments
+        options.set_preference('marionette.log.level', 'Trace')
+        options.set_preference('remote.log.level', 'Trace')
+        options.set_preference('webdriver.log.level', 'trace')
+        
+        # Network and security preferences
+        options.set_preference('network.http.connection-timeout', 60)
+        options.set_preference('network.http.connection-retry-timeout', 60)
+        options.set_preference('dom.max_script_run_time', 0)
+        options.set_preference('dom.max_chrome_script_run_time', 0)
+        
+        # Disable features that can cause startup issues
+        options.set_preference('browser.sessionstore.resume_from_crash', False)
+        options.set_preference('browser.crashReports.unsubmittedCheck.autoSubmit2', False)
+        options.set_preference('browser.tabs.crashReporting.sendReport', False)
+        
+        # Memory and performance settings
+        options.set_preference('browser.cache.disk.enable', False)
+        options.set_preference('browser.cache.memory.enable', False)
+        options.set_preference('browser.cache.offline.enable', False)
+        options.set_preference('network.http.use-cache', False)
+        
+        # Create service with enhanced logging
+        service = Service(
+            executable_path=GeckoDriverManager().install(),
+            log_path='/tmp/geckodriver.log'
+        )
+        
+        try:
+            print('Creating Firefox WebDriver instance...')
+            driver = webdriver.Firefox(service=service, options=options)
+            
+            print('Setting timeouts...')
+            driver.set_page_load_timeout(60)
+            driver.implicitly_wait(20)
+            
+            print('Testing navigation...')
+            driver.get('about:blank')
+            
+            print('Firefox WebDriver test successful!')
+            driver.quit()
+            print('Firefox cleanup completed')
+            
+        except Exception as e:
+            print(f'Firefox test failed with error: {e}')
+            # Print GeckoDriver logs for debugging
+            try:
+                with open('/tmp/geckodriver.log', 'r') as f:
+                    print('GeckoDriver logs:')
+                    print(f.read())
+            except:
+                print('Could not read GeckoDriver logs')
+            exit(1)
+        " || echo "Firefox test failed - continuing with xvfb-run fallback"
+    
+    - name: Create directories for reports
+      run: |
+        mkdir -p reports screenshots allure-results
+    
+    - name: Run tests with pytest
+      env:
+        BROWSER: ${{ matrix.browser }}
+        HEADLESS: true
+        DISPLAY: :99
+        # Firefox-specific environment variables for stability
+        MOZ_HEADLESS: 1
+        MOZ_DISABLE_CONTENT_SANDBOX: 1
+        # Prevent Firefox from creating crash reports
+        MOZ_CRASHREPORTER_DISABLE: 1
+      run: |
+        # Start Xvfb with larger screen and better color depth for Firefox
+        Xvfb :99 -ac -screen 0 1920x1080x24 -nolisten tcp -dpi 96 &
+        sleep 5
+        
+        # Verify Xvfb is running
+        ps aux | grep Xvfb
+        
+        # Use xvfb-run as additional wrapper for Firefox stability
+        if [ "${{ matrix.browser }}" = "firefox" ]; then
+          echo "Running Firefox tests with xvfb-run wrapper for additional stability"
+          xvfb-run -a -s "-screen 0 1920x1080x24 -ac -nolisten tcp -dpi 96" \
+            pytest tests/ \
+              --browser=${{ matrix.browser }} \
+              --headless \
+              --junit-xml=reports/junit-report-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+              --html=reports/test-report-${{ matrix.browser }}-py${{ matrix.python-version }}.html \
+              --self-contained-html \
+              --json-report \
+              --json-report-file=reports/json-report-${{ matrix.browser }}-py${{ matrix.python-version }}.json \
+              --alluredir=allure-results \
+              --cov=pages --cov=utilities \
+              --cov-report=xml:reports/coverage-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+              --cov-report=html:reports/coverage-html-${{ matrix.browser }}-py${{ matrix.python-version }} \
+              -v
+        else
+          echo "Running Chrome tests with standard Xvfb"
+          pytest tests/ \
+            --browser=${{ matrix.browser }} \
+            --headless \
+            --junit-xml=reports/junit-report-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+            --html=reports/test-report-${{ matrix.browser }}-py${{ matrix.python-version }}.html \
+            --self-contained-html \
+            --json-report \
+            --json-report-file=reports/json-report-${{ matrix.browser }}-py${{ matrix.python-version }}.json \
+            --alluredir=allure-results \
+            --cov=pages --cov=utilities \
+            --cov-report=xml:reports/coverage-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+            --cov-report=html:reports/coverage-html-${{ matrix.browser }}-py${{ matrix.python-version }} \
+            -v
+        fi
+    
+    - name: Generate Allure Report
+      if: always()
+      run: |
+        pip install allure-pytest
+        # Install Allure command line tool
+        wget https://github.com/allure-framework/allure2/releases/download/2.24.0/allure-2.24.0.tgz
+        tar -zxvf allure-2.24.0.tgz
+        sudo mv allure-2.24.0 /opt/allure
+        sudo ln -s /opt/allure/bin/allure /usr/bin/allure
+        allure generate allure-results --clean -o reports/allure-report-${{ matrix.browser }}-py${{ matrix.python-version }}
+    
+    - name: Upload test reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports-${{ matrix.browser }}-py${{ matrix.python-version }}
+        path: |
+          reports/
+          screenshots/
+        retention-days: 30
+
+  # Aggregate job to collect all test results
+  test-summary:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies for report aggregation
+      run: |
+        pip install jinja2 lxml beautifulsoup4
+    
+    - name: Generate aggregated test report
+      run: |
+        python -c "
+        import json
+        import glob
+        import os
+        from pathlib import Path
+        
+        # Collect all JSON reports
+        all_results = []
+        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
+            try:
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    browser = json_file.split('json-report-')[1].split('-py')[0]
+                    python_ver = json_file.split('-py')[1].split('.json')[0]
+                    data['browser'] = browser
+                    data['python_version'] = python_ver
+                    all_results.append(data)
+            except Exception as e:
+                print(f'Error processing {json_file}: {e}')
+        
+        # Generate summary
+        total_tests = sum(r.get('summary', {}).get('total', 0) for r in all_results)
+        total_passed = sum(r.get('summary', {}).get('passed', 0) for r in all_results)
+        total_failed = sum(r.get('summary', {}).get('failed', 0) for r in all_results)
+        total_skipped = sum(r.get('summary', {}).get('skipped', 0) for r in all_results)
+        
+        pass_rate = (total_passed / total_tests * 100) if total_tests > 0 else 0
+        
+        summary = {
+            'total_configurations': len(all_results),
+            'total_tests': total_tests,
+            'passed': total_passed,
+            'failed': total_failed,
+            'skipped': total_skipped,
+            'pass_rate': round(pass_rate, 2),
+            'configurations': all_results
+        }
+        
+        # Write summary
+        with open('test-summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print(f'=== Test Execution Summary ===')
+        print(f'Total Configurations Tested: {len(all_results)}')
+        print(f'Total Tests: {total_tests}')
+        print(f'Passed: {total_passed}')
+        print(f'Failed: {total_failed}')
+        print(f'Skipped: {total_skipped}')
+        print(f'Pass Rate: {pass_rate:.2f}%')
+        "
+    
+    - name: Upload aggregated summary
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-execution-summary
+        path: test-summary.json
+        retention-days: 30
+    
+    - name: Comment PR with test results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          try {
+            const summary = JSON.parse(fs.readFileSync('test-summary.json', 'utf8'));
+            const comment = `
+          ## 🧪 Test Execution Summary
+          
+          **Total Configurations:** ${summary.total_configurations}
+          **Total Tests:** ${summary.total_tests}
+          **Pass Rate:** ${summary.pass_rate}%
+          
+          | Status | Count |
+          |--------|-------|
+          | ✅ Passed | ${summary.passed} |
+          | ❌ Failed | ${summary.failed} |
+          | ⏭️ Skipped | ${summary.skipped} |
+          
+          ### Configuration Results:
+          ${summary.configurations.map(config => 
+            `- **${config.browser.toUpperCase()} + Python ${config.python_version}**: ${config.summary.passed}/${config.summary.total} passed (${((config.summary.passed/config.summary.total)*100).toFixed(1)}%)`
+          ).join('\n')}
+          
+          📊 Full reports available in the Actions artifacts.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+          } catch (error) {
+            console.log('Error posting comment:', error);
+          }
+
+  # Performance monitoring job
+  performance-check:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download test artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Performance Analysis
+      run: |
+        python -c "
+        import json
+        import glob
+        
+        # Collect performance data from all test runs
+        performance_data = []
+        
+        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
+            try:
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    browser = json_file.split('json-report-')[1].split('-py')[0]
+                    
+                    total_duration = data.get('duration', 0)
+                    test_count = data.get('summary', {}).get('total', 0)
+                    
+                    if test_count > 0:
+                        avg_test_time = total_duration / test_count
+                        performance_data.append({
+                            'browser': browser,
+                            'total_duration': round(total_duration, 2),
+                            'test_count': test_count,
+                            'avg_test_time': round(avg_test_time, 2),
+                            'tests_per_minute': round(60 / avg_test_time, 2) if avg_test_time > 0 else 0
+                        })
+            except Exception as e:
+                print(f'Error processing {json_file}: {e}')
+        
+        print('=== Performance Analysis ===')
+        for perf in sorted(performance_data, key=lambda x: x['total_duration']):
+            print(f'{perf[\"browser\"].upper()}: {perf[\"total_duration\"]}s total, {perf[\"avg_test_time\"]}s avg/test, {perf[\"tests_per_minute\"]} tests/min')
+        
+        # Check for performance regressions (simple threshold check)
+        slow_browsers = [p for p in performance_data if p['avg_test_time'] > 30]  # 30 seconds per test threshold
+        if slow_browsers:
+            print('⚠️  Performance Warning: Slow test execution detected:')
+            for browser in slow_browsers:
+                print(f'  - {browser[\"browser\"].upper()}: {browser[\"avg_test_time\"]}s average per test')
+        else:
+            print('✅ Performance: All browsers within acceptable thresholds')
+        "

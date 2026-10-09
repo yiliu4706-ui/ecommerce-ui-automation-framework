@@ -48,7 +48,7 @@ class TestDemoBlazeProducts:
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
-        for attempt in range(20):
+        for _ in range(20):
             try:
                 delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
                 if not delete_links:
@@ -57,10 +57,8 @@ class TestDemoBlazeProducts:
                 time.sleep(1.5)
             except StaleElementReferenceException:
                 time.sleep(1)
-                continue
             except Exception:
                 time.sleep(1)
-                continue
         time.sleep(2)
 
     def _add_product(self, driver, category, index=0):
@@ -91,15 +89,38 @@ class TestDemoBlazeProducts:
         WebDriverWait(driver, 20).until(lambda d: "prod.html" in d.current_url)
         time.sleep(2)
 
-        add_to_cart_btn = WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
-        )
-        self._js_click(driver, add_to_cart_btn)
+        for attempt in range(3):
+            try:
+                add_to_cart_btn = WebDriverWait(driver, 15).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", add_to_cart_btn)
+                time.sleep(0.5)
+                add_to_cart_btn.click()
 
-        alert_text = self._dismiss_alert_if_present(driver, timeout=15)
-        assert alert_text is not None, f"{category} 加购未弹出 alert"
-        time.sleep(3)
-        return product_name
+                alert_text = self._dismiss_alert_if_present(driver, timeout=10)
+                if alert_text is not None and "added" in alert_text.lower():
+                    print(f"[加购] 第 {attempt + 1} 次成功")
+                    time.sleep(3)
+                    return product_name
+                print(f"[加购] 第 {attempt + 1} 次未收到 alert")
+            except Exception as e:
+                print(f"[加购] 第 {attempt + 1} 次异常: {e}")
+
+            try:
+                driver.get("https://www.demoblaze.com/cart.html")
+                self.cart_page.wait_for_page_load()
+                time.sleep(2)
+                cart_items = self.cart_page.get_cart_items()
+                if any(product_name.lower() in item["name"].lower() for item in cart_items):
+                    print(f"[加购] 第 {attempt + 1} 次后商品已在购物车")
+                    return product_name
+                driver.get("https://www.demoblaze.com")
+                time.sleep(2)
+            except Exception:
+                pass
+
+        raise AssertionError(f"{category} 商品 {product_name} 加购失败")
 
     def test_product_categories_navigation(self, driver, app_config):
         self.login_user(driver)

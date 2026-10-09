@@ -45,22 +45,23 @@ class TestDemoBlazeCart:
         WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
 
     def _clear_cart(self, driver):
-        """访问购物车页面并删除所有商品，避免跨测试污染"""
-        try:
-            driver.get("https://www.demoblaze.com/cart.html")
-            self.cart_page.wait_for_page_load()
-            time.sleep(2)
-            for _ in range(10):
-                delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
-                if not delete_links:
-                    break
-                self._js_click(driver, delete_links[0])
-                time.sleep(2)
-        except Exception:
-            pass
+        """访问购物车页面，循环删除所有商品直到购物车为空"""
+        driver.get("https://www.demoblaze.com/cart.html")
+        self.cart_page.wait_for_page_load()
+        time.sleep(2)
+        for _ in range(15):
+            delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
+            if not delete_links:
+                break
+            self._js_click(driver, delete_links[0])
+            time.sleep(1.5)
+        # 最终确认购物车为空
+        WebDriverWait(driver, 10).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, "#tbodyid tr")) == 0
+        )
 
     def _add_product_once(self, driver, category="phones", index=0):
-        """稳健加购：只点击一次，避免重复加购"""
+        """加购一次，并验证购物车中已存在该商品，返回商品名"""
         driver.get("https://www.demoblaze.com")
         self.home_page.wait_for_page_load()
 
@@ -94,22 +95,25 @@ class TestDemoBlazeCart:
         )
         self._js_click(driver, add_to_cart_btn)
 
-        # 只等一次 alert，不重试
         alert_text = self._dismiss_alert_if_present(driver, timeout=15)
         assert alert_text is not None, f"{category} 加购未弹出 alert"
         assert "added" in alert_text.lower(), f"alert 内容异常: {alert_text}"
 
-        time.sleep(3)
+        # 立即跳转购物车验证该商品已存在
+        driver.get("https://www.demoblaze.com/cart.html")
+        self.cart_page.wait_for_page_load()
+        WebDriverWait(driver, 15).until(
+            lambda d: any(product_name.lower() in item["name"].lower()
+                          for item in self.cart_page.get_cart_items())
+        )
         return product_name
 
     def test_empty_cart_display(self, driver, app_config):
         self.login_user(driver)
         self._clear_cart(driver)
-
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(2)
-
         assert self.cart_page.is_cart_empty(), "Cart should be empty initially"
 
     def test_single_product_in_cart_verification(self, driver, app_config):
@@ -141,7 +145,6 @@ class TestDemoBlazeCart:
 
         cart_items = self.cart_page.get_cart_items()
         assert len(cart_items) >= 2, f"购物车应至少 2 件，实际 {len(cart_items)} 件"
-
         cart_names = [item["name"].lower() for item in cart_items]
         for product in added_products:
             assert any(product.lower() in name for name in cart_names)
@@ -196,10 +199,8 @@ class TestDemoBlazeCart:
 
     def test_cart_navigation_functionality(self, driver, app_config):
         self.login_user(driver)
-
         self.home_page.navigate_to_cart()
         assert "cart.html" in driver.current_url
-
         driver.get("https://www.demoblaze.com")
         time.sleep(2)
         driver.get("https://www.demoblaze.com/cart.html")

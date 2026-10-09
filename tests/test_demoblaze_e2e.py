@@ -53,21 +53,20 @@ class TestDemoBlazeE2EIntegration:
         WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
 
     def _clear_cart(self, driver):
-        try:
-            driver.get("https://www.demoblaze.com/cart.html")
-            self.cart_page.wait_for_page_load()
-            time.sleep(2)
-            for _ in range(10):
-                delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
-                if not delete_links:
-                    break
-                self._js_click(driver, delete_links[0])
-                time.sleep(2)
-        except Exception:
-            pass
+        driver.get("https://www.demoblaze.com/cart.html")
+        self.cart_page.wait_for_page_load()
+        time.sleep(2)
+        for _ in range(15):
+            delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
+            if not delete_links:
+                break
+            self._js_click(driver, delete_links[0])
+            time.sleep(1.5)
+        WebDriverWait(driver, 10).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, "#tbodyid tr")) == 0
+        )
 
     def _add_product_from_category(self, driver, category, index=0):
-        """稳健加购：只点击一次，不重试"""
         driver.get("https://www.demoblaze.com")
         self.home_page.wait_for_page_load()
 
@@ -81,7 +80,6 @@ class TestDemoBlazeE2EIntegration:
             EC.presence_of_element_located((By.CSS_SELECTOR, category_selector))
         )
         self._js_click(driver, cat_link)
-
         time.sleep(3)
         WebDriverWait(driver, 20).until(
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".hrefch"))
@@ -89,9 +87,7 @@ class TestDemoBlazeE2EIntegration:
 
         product_links = driver.find_elements(By.CSS_SELECTOR, ".hrefch")
         assert len(product_links) > index
-
-        products = self.home_page.get_product_list()
-        product_name = products[index]["name"]
+        product_name = product_links[index].text.strip()
 
         self._js_click(driver, product_links[index])
         WebDriverWait(driver, 20).until(lambda d: "prod.html" in d.current_url)
@@ -105,7 +101,12 @@ class TestDemoBlazeE2EIntegration:
         alert_text = self._dismiss_alert_if_present(driver, timeout=15)
         assert alert_text is not None, f"{category} 加购未弹出 alert"
 
-        time.sleep(3)
+        driver.get("https://www.demoblaze.com/cart.html")
+        self.cart_page.wait_for_page_load()
+        WebDriverWait(driver, 15).until(
+            lambda d: any(product_name.lower() in item["name"].lower()
+                          for item in self.cart_page.get_cart_items())
+        )
         return product_name
 
     def test_complete_single_product_purchase_flow(self, driver, app_config):

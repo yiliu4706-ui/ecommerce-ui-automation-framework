@@ -72,6 +72,7 @@ jobs:
         DISPLAY: :99
       run: |
         pytest tests/ --browser=chrome --headless -v \
+          --ignore=tests/test_network_conditions.py \
           --html=reports/report-chrome-py3.11.html --self-contained-html
 
     - name: Run Firefox tests - Python 3.11
@@ -82,6 +83,7 @@ jobs:
         MOZ_CRASHREPORTER_DISABLE: 1
       run: |
         pytest tests/ --browser=firefox --headless -v \
+          --ignore=tests/test_network_conditions.py \
           --html=reports/report-firefox-py3.11.html --self-contained-html
 
     - name: Set up Python 3.12
@@ -98,6 +100,7 @@ jobs:
         DISPLAY: :99
       run: |
         pytest tests/ --browser=chrome --headless -v \
+          --ignore=tests/test_network_conditions.py \
           --html=reports/report-chrome-py3.12.html --self-contained-html
 
     - name: Run Firefox tests - Python 3.12
@@ -108,7 +111,15 @@ jobs:
         MOZ_CRASHREPORTER_DISABLE: 1
       run: |
         pytest tests/ --browser=firefox --headless -v \
+          --ignore=tests/test_network_conditions.py \
           --html=reports/report-firefox-py3.12.html --self-contained-html
+
+    - name: Run Network Condition Tests (Chrome + CDP)
+      env:
+        DISPLAY: :99
+      run: |
+        pytest tests/test_network_conditions.py --browser=chrome --headless -v \
+          --html=reports/report-network-conditions.html --self-contained-html
 
     - name: Upload test reports
       uses: actions/upload-artifact@v4

@@ -10,30 +10,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-       max-parallel: 1  
-      matrix:
-        browser: [chrome, firefox]
-        python-version: ['3.11', '3.12']
-
-    name: Test on ${{ matrix.browser }} with Python ${{ matrix.python-version }}
-
     steps:
     - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
 
     - name: Clean up processes and cache
       run: |
@@ -50,186 +28,94 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y wget unzip xvfb dbus-x11
         sudo apt-get install -y libgtk-3-0 libdbus-glib-1-2 libxt6 libxcomposite1
-        sudo apt-get install -y libasound2t64 libpangocairo-1.0-0 libatk1.0-0 || sudo apt-get install -y libasound2 libpangocairo-1.0-0 libatk1.0-0
+        sudo apt-get install -y libasound2t64 libpangocairo-1.0-0 libatk1.0-0 || sudo apt-get install -y libasound2 libpangocairo-1.0-0 libatk1.0-0 || true
         sudo apt-get install -y libcairo-gobject2 libgdk-pixbuf2.0-0
         sudo apt-get install -y libx11-xcb1 libxtst6 libnss3 libxss1
 
     - name: Install Chrome
-      if: matrix.browser == 'chrome'
       run: |
         wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
         echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' | sudo tee /etc/apt/sources.list.d/google-chrome.list
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
 
-    - name: Install Firefox (Non-Snap via Mozilla PPA)
-      if: matrix.browser == 'firefox'
+    - name: Install Firefox (Mozilla PPA, non-snap)
       run: |
         sudo apt-get remove -y firefox firefox-esr || true
         sudo apt-get autoremove -y || true
         sudo add-apt-repository -y ppa:mozillateam/ppa
-        echo '
-        Package: *
-        Pin: release o=LP-PPA-mozillateam
-        Pin-Priority: 1001
-        ' | sudo tee /etc/apt/preferences.d/mozilla-firefox
+        printf 'Package: *\nPin: release o=LP-PPA-mozillateam\nPin-Priority: 1001\n' | sudo tee /etc/apt/preferences.d/mozilla-firefox
         sudo apt-get update
         sudo apt-get install -y firefox
         firefox --version
-        mkdir -p ~/.mozilla/firefox
-        chmod 755 ~/.mozilla/firefox
-        echo "MOZ_HEADLESS=1" >> $GITHUB_ENV
-        echo "MOZ_DISABLE_CONTENT_SANDBOX=1" >> $GITHUB_ENV
-        echo "MOZ_CRASHREPORTER_DISABLE=1" >> $GITHUB_ENV
 
-    - name: Install Python dependencies
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Python dependencies (3.11)
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Create directories for reports
+    - name: Create report directories
       run: mkdir -p reports screenshots allure-results
 
-    - name: Run tests with pytest
+    - name: Start Xvfb
+      run: |
+        Xvfb :99 -ac -screen 0 1920x1080x24 -nolisten tcp -dpi 96 &
+        sleep 5
+
+    - name: Run Chrome tests - Python 3.11
       env:
-        BROWSER: ${{ matrix.browser }}
-        HEADLESS: true
+        DISPLAY: :99
+      run: |
+        pytest tests/ --browser=chrome --headless -v \
+          --html=reports/report-chrome-py3.11.html --self-contained-html
+
+    - name: Run Firefox tests - Python 3.11
+      env:
         DISPLAY: :99
         MOZ_HEADLESS: 1
         MOZ_DISABLE_CONTENT_SANDBOX: 1
         MOZ_CRASHREPORTER_DISABLE: 1
       run: |
-        Xvfb :99 -ac -screen 0 1920x1080x24 -nolisten tcp -dpi 96 &
-        sleep 5
-        ps aux | grep Xvfb
+        pytest tests/ --browser=firefox --headless -v \
+          --html=reports/report-firefox-py3.11.html --self-contained-html
 
-        if [ "${{ matrix.browser }}" = "firefox" ]; then
-          xvfb-run -a -s "-screen 0 1920x1080x24 -ac -nolisten tcp -dpi 96" \
-            pytest tests/ \
-              --browser=${{ matrix.browser }} \
-              --headless \
-              --junit-xml=reports/junit-report-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
-              --html=reports/test-report-${{ matrix.browser }}-py${{ matrix.python-version }}.html \
-              --self-contained-html \
-              --json-report \
-              --json-report-file=reports/json-report-${{ matrix.browser }}-py${{ matrix.python-version }}.json \
-              --alluredir=allure-results \
-              --cov=pages --cov=utilities \
-              --cov-report=xml:reports/coverage-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
-              --cov-report=html:reports/coverage-html-${{ matrix.browser }}-py${{ matrix.python-version }} \
-              -v
-        else
-          pytest tests/ \
-            --browser=${{ matrix.browser }} \
-            --headless \
-            --junit-xml=reports/junit-report-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
-            --html=reports/test-report-${{ matrix.browser }}-py${{ matrix.python-version }}.html \
-            --self-contained-html \
-            --json-report \
-            --json-report-file=reports/json-report-${{ matrix.browser }}-py${{ matrix.python-version }}.json \
-            --alluredir=allure-results \
-            --cov=pages --cov=utilities \
-            --cov-report=xml:reports/coverage-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
-            --cov-report=html:reports/coverage-html-${{ matrix.browser }}-py${{ matrix.python-version }} \
-            -v
-        fi
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
 
-    - name: Generate Allure Report
-      if: always()
+    - name: Install Python dependencies (3.12)
       run: |
-        wget -q https://github.com/allure-framework/allure2/releases/download/2.24.0/allure-2.24.0.tgz
-        tar -zxvf allure-2.24.0.tgz
-        sudo mv allure-2.24.0 /opt/allure
-        sudo ln -s /opt/allure/bin/allure /usr/bin/allure
-        allure generate allure-results --clean -o reports/allure-report-${{ matrix.browser }}-py${{ matrix.python-version }} || true
+        pip install -r requirements.txt
+
+    - name: Run Chrome tests - Python 3.12
+      env:
+        DISPLAY: :99
+      run: |
+        pytest tests/ --browser=chrome --headless -v \
+          --html=reports/report-chrome-py3.12.html --self-contained-html
+
+    - name: Run Firefox tests - Python 3.12
+      env:
+        DISPLAY: :99
+        MOZ_HEADLESS: 1
+        MOZ_DISABLE_CONTENT_SANDBOX: 1
+        MOZ_CRASHREPORTER_DISABLE: 1
+      run: |
+        pytest tests/ --browser=firefox --headless -v \
+          --html=reports/report-firefox-py3.12.html --self-contained-html
 
     - name: Upload test reports
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: test-reports-${{ matrix.browser }}-py${{ matrix.python-version }}
+        name: test-reports
         path: |
           reports/
           screenshots/
         retention-days: 30
-
-  test-summary:
-    needs: test
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-    - uses: actions/checkout@v4
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - name: Generate aggregated summary
-      run: |
-        python -c "
-        import json, glob
-        all_results = []
-        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
-            try:
-                with open(json_file, 'r') as f:
-                    data = json.load(f)
-                    browser = json_file.split('json-report-')[1].split('-py')[0]
-                    python_ver = json_file.split('-py')[1].split('.json')[0]
-                    data['browser'] = browser
-                    data['python_version'] = python_ver
-                    all_results.append(data)
-            except Exception as e:
-                print(f'Error: {e}')
-        total = sum(r.get('summary', {}).get('total', 0) for r in all_results)
-        passed = sum(r.get('summary', {}).get('passed', 0) for r in all_results)
-        failed = sum(r.get('summary', {}).get('failed', 0) for r in all_results)
-        pass_rate = (passed / total * 100) if total > 0 else 0
-        with open('test-summary.json', 'w') as f:
-            json.dump({'total_tests': total, 'passed': passed, 'failed': failed, 'pass_rate': pass_rate}, f)
-        print(f'Total: {total}, Passed: {passed}, Failed: {failed}, Pass Rate: {pass_rate:.2f}%')
-        "
-    - name: Upload summary
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-execution-summary
-        path: test-summary.json
-        retention-days: 30
-
-  performance-check:
-    needs: test
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-    - uses: actions/checkout@v4
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    - name: Performance Analysis
-      run: |
-        python -c "
-        import json, glob
-        data = []
-        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
-            try:
-                with open(json_file, 'r') as f:
-                    d = json.load(f)
-                    browser = json_file.split('json-report-')[1].split('-py')[0]
-                    total_duration = d.get('duration', 0)
-                    test_count = d.get('summary', {}).get('total', 0)
-                    if test_count > 0:
-                        data.append({
-                            'browser': browser,
-                            'total_duration': round(total_duration, 2),
-                            'test_count': test_count,
-                            'avg_test_time': round(total_duration / test_count, 2)
-                        })
-            except Exception as e:
-                print(f'Error: {e}')
-        for p in data:
-            print(f'{p[\"browser\"].upper()}: {p[\"total_duration\"]}s total, {p[\"avg_test_time\"]}s avg/test')
-        "

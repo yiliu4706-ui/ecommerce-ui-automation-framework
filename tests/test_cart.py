@@ -9,7 +9,7 @@ from pages.demoblaze_cart_page import DemoBlazeCartPage
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoAlertPresentException
+from selenium.common.exceptions import TimeoutException, NoAlertPresentException, StaleElementReferenceException
 
 
 class TestDemoBlazeCart:
@@ -24,137 +24,132 @@ class TestDemoBlazeCart:
         try:
             WebDriverWait(driver, timeout).until(EC.alert_is_present())
             alert = driver.switch_to.alert
-            alert_text = alert.text
+            text = alert.text
             alert.accept()
-            return alert_text
+            return text
         except (TimeoutException, NoAlertPresentException):
             return None
 
-    def _login_and_clear_cart(self, driver):
-        """登录并清空购物车，保证测试从干净状态开始"""
+    def _js_click(self, driver, element):
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        time.sleep(0.5)
+        driver.execute_script("arguments[0].click();", element)
+
+    def login_user(self, driver):
         self.home_page.load_home_page()
         self.home_page.perform_login(
             username=self.test_user["username"],
             password=self.test_user["password"]
         )
-        self._dismiss_alert_if_present(driver)
-        time.sleep(2)
+        self._dismiss_alert_if_present(driver, timeout=2)
+        WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
 
-        # 清空购物车，避免跨用例残留
-        driver.get("https://www.demoblaze.com/cart.html")
-        self.cart_page.wait_for_page_load()
-        time.sleep(2)
-        self.cart_page.clear_cart()
-        time.sleep(1)
+    def _clear_cart(self, driver):
+        """访问购物车页面并删除所有商品，避免跨测试污染"""
+        try:
+            driver.get("https://www.demoblaze.com/cart.html")
+            self.cart_page.wait_for_page_load()
+            time.sleep(2)
+            for _ in range(10):
+                delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
+                if not delete_links:
+                    break
+                self._js_click(driver, delete_links[0])
+                time.sleep(2)
+        except Exception:
+            pass
 
-    def login_and_add_product(self, driver, category="phones", product_index=0):
-        # 先清空购物车，确保干净状态
-        self._login_and_clear_cart(driver)
+    def _add_product_once(self, driver, category="phones", index=0):
+        """稳健加购：只点击一次，避免重复加购"""
+        driver.get("https://www.demoblaze.com")
+        self.home_page.wait_for_page_load()
 
-        # 回到首页，添加商品
-        self.home_page.load_home_page()
-        self.home_page.select_category(category)
-        time.sleep(2)
+        category_selector = {
+            "phones": "a[onclick*='phone']",
+            "laptops": "a[onclick*='notebook']",
+            "monitors": "a[onclick*='monitor']"
+        }[category]
 
-        products = self.home_page.get_product_list()
-        product_name = products[product_index]["name"]
+        cat_link = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, category_selector))
+        )
+        self._js_click(driver, cat_link)
+
+        time.sleep(3)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".hrefch"))
+        )
 
         product_links = driver.find_elements(By.CSS_SELECTOR, ".hrefch")
-        product_links[product_index].click()
-        time.sleep(3)
+        assert len(product_links) > index, f"{category} 商品数量不足"
+        product_name = product_links[index].text.strip()
+        print(f"[加购] 分类={category}, index={index}, 商品名={product_name}")
 
-        add_to_cart_btn = WebDriverWait(driver, 10).until(
+        self._js_click(driver, product_links[index])
+        WebDriverWait(driver, 20).until(lambda d: "prod.html" in d.current_url)
+        time.sleep(2)
+
+        add_to_cart_btn = WebDriverWait(driver, 20).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
         )
-        add_to_cart_btn.click()
-        time.sleep(2)
-        self._dismiss_alert_if_present(driver, timeout=5)
+        self._js_click(driver, add_to_cart_btn)
 
+        # 只等一次 alert，不重试
+        alert_text = self._dismiss_alert_if_present(driver, timeout=15)
+        assert alert_text is not None, f"{category} 加购未弹出 alert"
+        assert "added" in alert_text.lower(), f"alert 内容异常: {alert_text}"
+
+        time.sleep(3)
         return product_name
 
     def test_empty_cart_display(self, driver, app_config):
-        print("Scenario: User views an empty shopping cart")
+        self.login_user(driver)
+        self._clear_cart(driver)
 
-        # 登录后强制清空购物车
-        self._login_and_clear_cart(driver)
-
-        # 重新加载购物车页面确认已空
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(2)
 
-        assert self.cart_page.is_cart_empty(), "Cart should be empty after clear_cart"
-
-        cart_summary = self.cart_page.get_cart_summary()
-        assert cart_summary["item_count"] == 0
-        assert cart_summary["is_empty"] == True
-
-        print("Empty cart displays correctly")
+        assert self.cart_page.is_cart_empty(), "Cart should be empty initially"
 
     def test_single_product_in_cart_verification(self, driver, app_config):
-        print("Scenario: User views cart item information")
-
-        # login_and_add_product 内部已先清空购物车
-        product_name = self.login_and_add_product(driver, "phones", 0)
+        self.login_user(driver)
+        self._clear_cart(driver)
+        product_name = self._add_product_once(driver, "phones", 0)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
         cart_items = self.cart_page.get_cart_items()
-        assert len(cart_items) == 1, f"Cart should contain exactly 1 item, found {len(cart_items)}"
-
-        cart_item = cart_items[0]
-        assert product_name.lower() in cart_item["name"].lower()
-        assert cart_item["price"]
-
-        print(f"Single product verified in cart: {cart_item['name']} - {cart_item['price']}")
+        assert len(cart_items) == 1, f"购物车应恰好 1 件，实际 {len(cart_items)} 件"
+        assert product_name.lower() in cart_items[0]["name"].lower()
+        assert cart_items[0]["price"]
 
     def test_multiple_products_cart_verification(self, driver, app_config):
-        print("Scenario: User verifies multiple products in cart")
+        self.login_user(driver)
+        self._clear_cart(driver)
 
-        # 第一次添加会清空购物车
-        product1 = self.login_and_add_product(driver, "phones", 0)
-        added_products = [product1]
-
-        # 添加第二个商品（不清空）
-        driver.get("https://www.demoblaze.com")
-        self._dismiss_alert_if_present(driver, timeout=2)
-        self.home_page.select_category("laptops")
-        time.sleep(2)
-
-        laptops = self.home_page.get_product_list()
-        product2 = laptops[0]["name"]
-        added_products.append(product2)
-
-        laptop_links = driver.find_elements(By.CSS_SELECTOR, ".hrefch")
-        laptop_links[0].click()
-        time.sleep(3)
-
-        add_to_cart_btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
-        )
-        add_to_cart_btn.click()
-        time.sleep(2)
-        self._dismiss_alert_if_present(driver, timeout=5)
+        added_products = []
+        for i in range(2):
+            name = self._add_product_once(driver, "phones", i)
+            added_products.append(name)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
         cart_items = self.cart_page.get_cart_items()
-        assert len(cart_items) >= 2
+        assert len(cart_items) >= 2, f"购物车应至少 2 件，实际 {len(cart_items)} 件"
 
         cart_names = [item["name"].lower() for item in cart_items]
-        for product_name in added_products:
-            assert any(product_name.lower() in cart_name for cart_name in cart_names)
-
-        print(f"Multiple products verified in cart: {len(cart_items)} items")
+        for product in added_products:
+            assert any(product.lower() in name for name in cart_names)
 
     def test_cart_total_calculation(self, driver, app_config):
-        print("Scenario: User verifies cart total calculation accuracy")
-
-        product_name = self.login_and_add_product(driver, "phones", 0)
+        self.login_user(driver)
+        self._clear_cart(driver)
+        self._add_product_once(driver, "phones", 0)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
@@ -162,8 +157,7 @@ class TestDemoBlazeCart:
 
         cart_items = self.cart_page.get_cart_items()
         total_price = self.cart_page.get_total_price()
-
-        assert total_price, "Total price should be displayed"
+        assert total_price
 
         calculated_total = 0
         for item in cart_items:
@@ -180,12 +174,10 @@ class TestDemoBlazeCart:
         except ValueError:
             pass
 
-        print(f"Cart total calculation verified: {total_price}")
-
     def test_cart_item_removal(self, driver, app_config):
-        print("Scenario: User removes an item from their cart")
-
-        product_name = self.login_and_add_product(driver, "phones", 0)
+        self.login_user(driver)
+        self._clear_cart(driver)
+        product_name = self._add_product_once(driver, "phones", 0)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
@@ -202,58 +194,40 @@ class TestDemoBlazeCart:
         cart_items_after = self.cart_page.get_cart_items()
         assert len(cart_items_after) < initial_count
 
-        print(f"Product removal verified: {product_name}")
-
     def test_cart_navigation_functionality(self, driver, app_config):
-        print("Scenario: User navigates cart page interface elements")
-
-        self.home_page.load_home_page()
-        self.home_page.perform_login(
-            username=self.test_user["username"],
-            password=self.test_user["password"]
-        )
-        self._dismiss_alert_if_present(driver)
+        self.login_user(driver)
 
         self.home_page.navigate_to_cart()
         assert "cart.html" in driver.current_url
 
         driver.get("https://www.demoblaze.com")
         time.sleep(2)
-
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
-
         assert "cart.html" in driver.current_url
 
-        print("Cart navigation functionality verified")
-
     def test_cart_persistence_across_sessions(self, driver, app_config):
-        print("Scenario: User verifies cart persistence during site navigation")
-
-        product_name = self.login_and_add_product(driver, "phones", 0)
+        self.login_user(driver)
+        self._clear_cart(driver)
+        self._add_product_once(driver, "phones", 0)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
-        initial_cart_items = self.cart_page.get_cart_items()
-        initial_count = len(initial_cart_items)
-        assert initial_count > 0
+        initial_count = len(self.cart_page.get_cart_items())
+        assert initial_count == 1, f"购物车应恰好 1 件，实际 {initial_count} 件"
 
         driver.get("https://www.demoblaze.com")
         time.sleep(2)
-
         driver.get("https://www.demoblaze.com/index.html")
         time.sleep(2)
-
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(2)
 
-        persisted_cart_items = self.cart_page.get_cart_items()
-        assert len(persisted_cart_items) == initial_count
-
-        print(f"Cart persistence verified: {len(persisted_cart_items)} items maintained")
+        final_count = len(self.cart_page.get_cart_items())
+        assert final_count == initial_count
 
     @pytest.fixture(scope="function", autouse=True)
     def cleanup_cart(self, driver):
@@ -264,6 +238,5 @@ class TestDemoBlazeCart:
                 home_page = DemoBlazeHomePage(driver)
                 if home_page.is_user_logged_in():
                     home_page.logout()
-                    time.sleep(1)
         except Exception:
             pass

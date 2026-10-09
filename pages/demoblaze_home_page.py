@@ -5,7 +5,7 @@ DemoBlaze Home Page Object - Enhanced for E-commerce Testing
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 from pages.base_page import BasePage
 import time
 import random
@@ -137,25 +137,30 @@ class DemoBlazeHomePage(BasePage):
         return self
 
     def get_product_list(self):
-        products = []
-        try:
-            product_elements = self.driver.find_elements(*self.PRODUCT_ITEMS)
-            for product_element in product_elements:
-                try:
-                    title_element = product_element.find_element(*self.PRODUCT_TITLES)
-                    price_element = product_element.find_element(*self.PRODUCT_PRICES)
-                    product_data = {
-                        "name": title_element.text.strip(),
-                        "price": price_element.text.strip(),
-                        "element": product_element,
-                        "link": title_element.get_attribute("href")
-                    }
-                    products.append(product_data)
-                except NoSuchElementException:
-                    continue
-        except NoSuchElementException:
-            pass
-        return products
+        """带 3 次重试的稳健商品列表获取，避免 StaleElementReferenceException"""
+        for attempt in range(3):
+            try:
+                products = []
+                product_elements = self.driver.find_elements(*self.PRODUCT_ITEMS)
+                for product_element in product_elements:
+                    try:
+                        title_element = product_element.find_element(*self.PRODUCT_TITLES)
+                        price_element = product_element.find_element(*self.PRODUCT_PRICES)
+                        product_data = {
+                            "name": title_element.text.strip(),
+                            "price": price_element.text.strip(),
+                            "element": product_element,
+                            "link": title_element.get_attribute("href")
+                        }
+                        products.append(product_data)
+                    except StaleElementReferenceException:
+                        continue
+                if products:
+                    return products
+            except StaleElementReferenceException:
+                pass
+            time.sleep(2)
+        return []
 
     def click_product(self, product_name):
         products = self.get_product_list()
@@ -180,7 +185,7 @@ class DemoBlazeHomePage(BasePage):
                     alert_text = alert.text
                     alert.accept()
                     self.load_home_page()
-                    return "product added" in alert_text.lower() or "added" in alert_text.lower()
+                    return "added" in alert_text.lower()
                 except Exception:
                     self.load_home_page()
                     return True

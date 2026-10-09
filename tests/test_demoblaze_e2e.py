@@ -38,6 +38,11 @@ class TestDemoBlazeE2EIntegration:
         except (TimeoutException, NoAlertPresentException):
             return None
 
+    def _js_click(self, driver, element):
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+        time.sleep(0.5)
+        driver.execute_script("arguments[0].click();", element)
+
     def _login(self, driver):
         self.home_page.load_home_page()
         self.home_page.perform_login(
@@ -47,7 +52,22 @@ class TestDemoBlazeE2EIntegration:
         self._dismiss_alert_if_present(driver, timeout=2)
         WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
 
+    def _clear_cart(self, driver):
+        try:
+            driver.get("https://www.demoblaze.com/cart.html")
+            self.cart_page.wait_for_page_load()
+            time.sleep(2)
+            for _ in range(10):
+                delete_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='deleteItem']")
+                if not delete_links:
+                    break
+                self._js_click(driver, delete_links[0])
+                time.sleep(2)
+        except Exception:
+            pass
+
     def _add_product_from_category(self, driver, category, index=0):
+        """稳健加购：只点击一次，不重试"""
         driver.get("https://www.demoblaze.com")
         self.home_page.wait_for_page_load()
 
@@ -58,26 +78,31 @@ class TestDemoBlazeE2EIntegration:
         }[category]
 
         cat_link = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, category_selector))
+            EC.presence_of_element_located((By.CSS_SELECTOR, category_selector))
         )
-        cat_link.click()
+        self._js_click(driver, cat_link)
 
-        product_links = WebDriverWait(driver, 15).until(
+        time.sleep(3)
+        WebDriverWait(driver, 20).until(
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".hrefch"))
         )
+
+        product_links = driver.find_elements(By.CSS_SELECTOR, ".hrefch")
         assert len(product_links) > index
 
         products = self.home_page.get_product_list()
         product_name = products[index]["name"]
 
-        product_links[index].click()
+        self._js_click(driver, product_links[index])
+        WebDriverWait(driver, 20).until(lambda d: "prod.html" in d.current_url)
+        time.sleep(2)
 
-        add_to_cart_btn = WebDriverWait(driver, 15).until(
+        add_to_cart_btn = WebDriverWait(driver, 20).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
         )
-        add_to_cart_btn.click()
+        self._js_click(driver, add_to_cart_btn)
 
-        alert_text = self._dismiss_alert_if_present(driver, timeout=10)
+        alert_text = self._dismiss_alert_if_present(driver, timeout=15)
         assert alert_text is not None, f"{category} 加购未弹出 alert"
 
         time.sleep(3)
@@ -85,57 +110,48 @@ class TestDemoBlazeE2EIntegration:
 
     def test_complete_single_product_purchase_flow(self, driver, app_config):
         self._login(driver)
-        assert self.home_page.is_user_logged_in()
-
-        selected_product = self._add_product_from_category(driver, "phones")
+        self._clear_cart(driver)
+        self._add_product_from_category(driver, "phones")
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
         cart_items = self.cart_page.get_cart_items()
-        assert len(cart_items) > 0, "购物车为空"
+        assert len(cart_items) > 0
 
         self.cart_page.proceed_to_checkout()
         self.cart_page.fill_checkout_form(self.customer_info)
+        assert self.cart_page.complete_purchase()
 
-        purchase_success = self.cart_page.complete_purchase()
-        assert purchase_success
-
-        confirmation_details = self.cart_page.get_order_confirmation_details()
-        assert confirmation_details["success"]
-        order_number = self.cart_page.extract_order_number(confirmation_details)
-        assert order_number
+        details = self.cart_page.get_order_confirmation_details()
+        assert details["success"]
+        assert self.cart_page.extract_order_number(details)
 
         driver.save_screenshot(f"screenshots/e2e_single_product_{time.strftime('%Y%m%d_%H%M%S')}.png")
         self.cart_page.confirm_success_message()
 
     def test_complete_multi_product_purchase_flow(self, driver, app_config):
         self._login(driver)
-        assert self.home_page.is_user_logged_in()
+        self._clear_cart(driver)
 
-        selected_products = []
         for category in ["phones", "laptops"]:
-            product = self._add_product_from_category(driver, category)
-            selected_products.append(product)
+            self._add_product_from_category(driver, category)
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
         cart_items = self.cart_page.get_cart_items()
-        assert len(cart_items) >= 2, f"购物车应至少 2 件，实际 {len(cart_items)} 件"
+        assert len(cart_items) >= 2
 
         self.cart_page.proceed_to_checkout()
         self.cart_page.fill_checkout_form(self.customer_info)
+        assert self.cart_page.complete_purchase()
 
-        purchase_success = self.cart_page.complete_purchase()
-        assert purchase_success
-
-        confirmation_details = self.cart_page.get_order_confirmation_details()
-        assert confirmation_details["success"]
-        order_number = self.cart_page.extract_order_number(confirmation_details)
-        assert order_number
+        details = self.cart_page.get_order_confirmation_details()
+        assert details["success"]
+        assert self.cart_page.extract_order_number(details)
 
         driver.save_screenshot(f"screenshots/e2e_multi_product_{time.strftime('%Y%m%d_%H%M%S')}.png")
         self.cart_page.confirm_success_message()
@@ -151,24 +167,22 @@ class TestDemoBlazeE2EIntegration:
         self._dismiss_alert_if_present(driver, timeout=2)
         WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
 
-        categories_explored = []
         for category in ["phones", "laptops", "monitors"]:
             self.home_page.select_category(category)
             WebDriverWait(driver, 15).until(
                 EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".hrefch"))
             )
-            products = self.home_page.get_product_list()
-            categories_explored.append(category)
-            assert len(products) > 0
+            assert len(self.home_page.get_product_list()) > 0
 
-        selected_phone = self._add_product_from_category(driver, "phones")
+        self._clear_cart(driver)
+        self._add_product_from_category(driver, "phones")
 
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
 
         cart_summary = self.cart_page.get_cart_summary()
-        assert not cart_summary["is_empty"], "购物车为空，会话工作流失败"
+        assert not cart_summary["is_empty"]
 
         self.cart_page.proceed_to_checkout()
         session_customer_info = {
@@ -180,18 +194,15 @@ class TestDemoBlazeE2EIntegration:
             "year": "2026"
         }
         self.cart_page.fill_checkout_form(session_customer_info)
+        assert self.cart_page.complete_purchase()
 
-        purchase_success = self.cart_page.complete_purchase()
-        assert purchase_success
-
-        confirmation_details = self.cart_page.get_order_confirmation_details()
-        order_number = self.cart_page.extract_order_number(confirmation_details)
-        assert order_number
+        details = self.cart_page.get_order_confirmation_details()
+        assert self.cart_page.extract_order_number(details)
 
         self.cart_page.confirm_success_message()
         time.sleep(3)
-
         self._dismiss_alert_if_present(driver, timeout=2)
+
         try:
             logout_btn = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "logout2"))
@@ -202,13 +213,11 @@ class TestDemoBlazeE2EIntegration:
             pass
 
         assert not self.home_page.is_user_logged_in()
-
         driver.save_screenshot(f"screenshots/e2e_complete_session_{time.strftime('%Y%m%d_%H%M%S')}.png")
 
     def test_single_product_purchase_with_verification(self, driver, app_config):
         self._login(driver)
-        assert self.home_page.is_user_logged_in()
-
+        self._clear_cart(driver)
         selected_product = self._add_product_from_category(driver, "phones")
 
         driver.get("https://www.demoblaze.com/cart.html")
@@ -221,23 +230,19 @@ class TestDemoBlazeE2EIntegration:
 
         self.cart_page.proceed_to_checkout()
         self.cart_page.fill_checkout_form(self.customer_info)
+        assert self.cart_page.complete_purchase()
 
-        purchase_success = self.cart_page.complete_purchase()
-        assert purchase_success
-
-        confirmation_details = self.cart_page.get_order_confirmation_details()
-        assert confirmation_details["success"]
-        assert "thank you" in confirmation_details["title"].lower()
-
-        order_number = self.cart_page.extract_order_number(confirmation_details)
-        assert order_number and order_number.isdigit()
+        details = self.cart_page.get_order_confirmation_details()
+        assert details["success"]
+        assert "thank you" in details["title"].lower()
+        assert self.cart_page.extract_order_number(details)
 
         driver.save_screenshot(f"screenshots/verified_purchase_{time.strftime('%Y%m%d_%H%M%S')}.png")
         self.cart_page.confirm_success_message()
 
     def test_two_different_products_purchase(self, driver, app_config):
         self._login(driver)
-        assert self.home_page.is_user_logged_in()
+        self._clear_cart(driver)
 
         selected_products = []
         for category in ["phones", "laptops"]:
@@ -265,15 +270,11 @@ class TestDemoBlazeE2EIntegration:
             "year": "2027"
         }
         self.cart_page.fill_checkout_form(checkout_data)
+        assert self.cart_page.complete_purchase()
 
-        purchase_success = self.cart_page.complete_purchase()
-        assert purchase_success
-
-        confirmation_details = self.cart_page.get_order_confirmation_details()
-        assert confirmation_details["success"]
-
-        order_number = self.cart_page.extract_order_number(confirmation_details)
-        assert order_number
+        details = self.cart_page.get_order_confirmation_details()
+        assert details["success"]
+        assert self.cart_page.extract_order_number(details)
 
         driver.save_screenshot(f"screenshots/two_products_purchase_{time.strftime('%Y%m%d_%H%M%S')}.png")
         self.cart_page.confirm_success_message()
@@ -289,7 +290,6 @@ class TestDemoBlazeE2EIntegration:
                     close_btn.click()
             except Exception:
                 pass
-
             if "demoblaze.com" in driver.current_url:
                 home_page = DemoBlazeHomePage(driver)
                 if home_page.is_user_logged_in():

@@ -20,13 +20,19 @@ class TestDemoBlazeCheckout:
         self.cart_page = DemoBlazeCartPage(driver)
         self.test_user = {"username": "test", "password": "test"}
         self.valid_customer_info = {
-            "name": "Test Customer",
-            "country": "United States",
-            "city": "New York",
-            "credit_card": "4111111111111111",
-            "month": "12",
-            "year": "2025"
+            "name": "Test Customer", "country": "United States", "city": "New York",
+            "credit_card": "4111111111111111", "month": "12", "year": "2025"
         }
+
+    def _force_dismiss_alert(self, driver):
+        try:
+            alert = driver.switch_to.alert
+            text = alert.text
+            alert.accept()
+            time.sleep(0.5)
+            return text
+        except Exception:
+            return None
 
     def _dismiss_alert_if_present(self, driver, timeout=3):
         try:
@@ -46,8 +52,7 @@ class TestDemoBlazeCheckout:
     def _login(self, driver):
         self.home_page.load_home_page()
         self.home_page.perform_login(
-            username=self.test_user["username"],
-            password=self.test_user["password"]
+            username=self.test_user["username"], password=self.test_user["password"]
         )
         self._dismiss_alert_if_present(driver, timeout=2)
         WebDriverWait(driver, 15).until(lambda d: self.home_page.is_user_logged_in())
@@ -69,16 +74,14 @@ class TestDemoBlazeCheckout:
                 time.sleep(1)
         time.sleep(2)
 
-    def _add_product_to_cart(self, driver, category="phones", index=0):
+    def _navigate_to_product_detail(self, driver, category, index):
         driver.get("https://www.demoblaze.com")
         self.home_page.wait_for_page_load()
-
         category_selector = {
             "phones": "a[onclick*='phone']",
             "laptops": "a[onclick*='notebook']",
             "monitors": "a[onclick*='monitor']"
         }[category]
-
         cat_link = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, category_selector))
         )
@@ -87,44 +90,61 @@ class TestDemoBlazeCheckout:
         WebDriverWait(driver, 20).until(
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".hrefch"))
         )
-
         product_links = driver.find_elements(By.CSS_SELECTOR, ".hrefch")
         assert len(product_links) > index
         product_name = product_links[index].text.strip()
-
         self._js_click(driver, product_links[index])
         WebDriverWait(driver, 20).until(lambda d: "prod.html" in d.current_url)
         time.sleep(2)
+        return product_name
 
-        for attempt in range(3):
+    def _add_product_to_cart(self, driver, category="phones", index=0):
+        product_name = None
+        last_error = None
+        for attempt in range(4):
+            print(f"[加购] ===== 第 {attempt + 1} 轮 =====")
+            try:
+                product_name = self._navigate_to_product_detail(driver, category, index)
+                print(f"[加购] 商品名: {product_name}")
+            except Exception as e:
+                last_error = e
+                print(f"[加购] 导航失败: {e}")
+                time.sleep(2)
+                continue
+            self._force_dismiss_alert(driver)
+            time.sleep(1)
             try:
                 add_to_cart_btn = WebDriverWait(driver, 15).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, "a[onclick*='addToCart']"))
                 )
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", add_to_cart_btn)
-                time.sleep(0.5)
                 add_to_cart_btn.click()
-
-                alert_text = self._dismiss_alert_if_present(driver, timeout=10)
-                if alert_text is not None and "added" in alert_text.lower():
-                    time.sleep(3)
-                    return product_name
+                print(f"[加购] 已点击加购按钮")
             except Exception as e:
-                print(f"[加购] 第 {attempt + 1} 次异常: {e}")
-
+                last_error = e
+                print(f"[加购] 点击失败: {e}")
+                self._force_dismiss_alert(driver)
+                continue
+            for _ in range(15):
+                try:
+                    alert = driver.switch_to.alert
+                    print(f"[加购] 捕获 alert: {alert.text}")
+                    alert.accept()
+                    break
+                except Exception:
+                    time.sleep(1)
             try:
                 driver.get("https://www.demoblaze.com/cart.html")
                 self.cart_page.wait_for_page_load()
-                time.sleep(2)
+                time.sleep(3)
                 cart_items = self.cart_page.get_cart_items()
-                if any(product_name.lower() in item["name"].lower() for item in cart_items):
+                cart_names = [item["name"].lower() for item in cart_items]
+                if any(product_name.lower() in n for n in cart_names):
+                    print(f"[加购] 第 {attempt + 1} 轮验证成功")
                     return product_name
-                driver.get("https://www.demoblaze.com")
-                time.sleep(2)
-            except Exception:
-                pass
-
-        raise AssertionError(f"{category} 商品 {product_name} 加购失败")
+            except Exception as e:
+                last_error = e
+            time.sleep(2)
+        raise AssertionError(f"{category} 商品 {product_name} 加购失败: {last_error}")
 
     def setup_cart_with_product(self, driver):
         self._clear_cart(driver)
@@ -132,17 +152,15 @@ class TestDemoBlazeCheckout:
         driver.get("https://www.demoblaze.com/cart.html")
         self.cart_page.wait_for_page_load()
         time.sleep(3)
-        cart_items = self.cart_page.get_cart_items()
-        assert len(cart_items) > 0, "购物车为空，加购流程失败"
+        assert len(self.cart_page.get_cart_items()) > 0
 
     def test_checkout_modal_opening(self, driver, app_config):
         self._login(driver)
         self.setup_cart_with_product(driver)
         self.cart_page.proceed_to_checkout()
-        modal = WebDriverWait(driver, 10).until(
+        assert WebDriverWait(driver, 10).until(
             EC.visibility_of_element_located((By.ID, "orderModal"))
-        )
-        assert modal.is_displayed()
+        ).is_displayed()
         try:
             self._js_click(driver, driver.find_element(By.CSS_SELECTOR, "#orderModal .btn-secondary"))
         except Exception:
@@ -153,10 +171,9 @@ class TestDemoBlazeCheckout:
         self.setup_cart_with_product(driver)
         self.cart_page.proceed_to_checkout()
         for field_id in ["name", "country", "city", "card", "month", "year"]:
-            field = WebDriverWait(driver, 10).until(
+            assert WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, field_id))
-            )
-            assert field.is_displayed()
+            ).is_displayed()
         try:
             self._js_click(driver, driver.find_element(By.CSS_SELECTOR, "#orderModal .btn-secondary"))
         except Exception:
@@ -179,14 +196,8 @@ class TestDemoBlazeCheckout:
         self._login(driver)
         self.setup_cart_with_product(driver)
         self.cart_page.proceed_to_checkout()
-        test_data = {
-            "name": "John Doe",
-            "country": "Canada",
-            "city": "Toronto",
-            "credit_card": "5555444433332222",
-            "month": "03",
-            "year": "2027"
-        }
+        test_data = {"name": "John Doe", "country": "Canada", "city": "Toronto",
+                     "credit_card": "5555444433332222", "month": "03", "year": "2027"}
         self.cart_page.fill_checkout_form(test_data)
         assert driver.find_element(By.ID, "name").get_attribute("value") == test_data["name"]
         assert driver.find_element(By.ID, "country").get_attribute("value") == test_data["country"]
@@ -199,10 +210,9 @@ class TestDemoBlazeCheckout:
         self._login(driver)
         self.setup_cart_with_product(driver)
         self.cart_page.proceed_to_checkout()
-        purchase_btn = WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button[onclick='purchaseOrder()']"))
-        )
-        purchase_btn.click()
+        ).click()
         time.sleep(2)
         alert_text = self._dismiss_alert_if_present(driver, timeout=5)
         assert alert_text is not None
@@ -222,7 +232,7 @@ class TestDemoBlazeCheckout:
         ]
         successful_orders = []
         for i, customer_data in enumerate(customer_variations, 1):
-            self._dismiss_alert_if_present(driver, timeout=1)
+            self._force_dismiss_alert(driver)
             try:
                 confirm_btn = driver.find_element(By.CSS_SELECTOR, ".confirm")
                 if confirm_btn.is_displayed():
@@ -273,7 +283,7 @@ class TestDemoBlazeCheckout:
     def cleanup_checkout(self, driver):
         yield
         try:
-            self._dismiss_alert_if_present(driver, timeout=1)
+            self._force_dismiss_alert(driver)
             try:
                 confirm_btn = driver.find_element(By.CSS_SELECTOR, ".confirm")
                 if confirm_btn.is_displayed():
